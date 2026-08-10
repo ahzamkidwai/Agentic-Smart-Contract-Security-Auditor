@@ -1,0 +1,36 @@
+# Static analysis
+slither-analyzer
+mythril
+solc-select
+
+# LangChain / LangGraph
+langchain
+langchain-community
+langchain-huggingface
+langchain-groq
+langgraph
+
+# Vector store / embeddings
+chromadb
+sentence-transformers
+
+# Schemas
+pydantic
+
+# Report generation
+jinja2
+markdown2
+weasyprint
+
+# API + persistence
+fastapi
+uvicorn[standard]
+python-multipart
+sqlmodel
+
+# Utilities
+python-dotenv
+gitpython
+
+# Testing
+pytest
