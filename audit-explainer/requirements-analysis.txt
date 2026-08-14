@@ -1,9 +1,0 @@
-# .venv-analysis -- security tooling ONLY. Do not install this alongside
-# requirements.txt in the same environment; their web3/eth-* pins conflict
-# with the langchain/chromadb stack. Wire the two envs together via the
-# absolute binary paths in config.py (SLITHER_BIN, SOLC_SELECT_BIN) instead.
-#
-# Mythril is intentionally excluded -- see config.py docstring for why.
-
-slither-analyzer==0.10.4
-solc-select==1.0.4

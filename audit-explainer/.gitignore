@@ -1,9 +1,0 @@
-.venv-analysis/
-.venv-app/
-data/chroma_db/
-data/*.db
-outputs/*.pdf
-__pycache__/
-*.pyc
-.env
-.pytest_cache/
