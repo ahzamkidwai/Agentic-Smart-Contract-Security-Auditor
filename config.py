@@ -53,9 +53,11 @@ class Settings(BaseSettings):
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
     GOOGLE_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-1.5-flash"
+    HF_TOKEN: str = ""
 
     # --- Vector store / knowledge base ---
     CHROMA_PERSIST_DIR: str = str(BASE_DIR / "data" / "chroma_db")
+    FAISS_PERSIST_DIR: str = str(BASE_DIR / "data" / "faiss_index")
     SWC_REGISTRY_DIR: str = str(BASE_DIR / "data" / "swc_registry")
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
