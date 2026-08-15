@@ -52,18 +52,8 @@ def build_or_load_vectorstore() -> FAISS:
 
     if already_built:
         print("Loading existing FAISS vector store...")
-
-        vectorstore = FAISS.load_local(
-            str(persist_dir),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-
-        print(
-            "Loaded Vector Store:",
-            vectorstore,
-        )
-
+        vectorstore = FAISS.load_local(str(persist_dir), embeddings, allow_dangerous_deserialization=True)
+        print("Loaded Vector Store:", vectorstore)
         return vectorstore
 
     # -----------------------------------------
@@ -74,39 +64,30 @@ def build_or_load_vectorstore() -> FAISS:
 
     docs = _load_swc_docs()
 
-    print(
-        "Documents:",
-        len(docs),
-    )
+    print("Documents(len): ",len(docs))
+    print("Documents: \n",docs)
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=100,
-    )
+    splitter = RecursiveCharacterTextSplitter( chunk_size=800, chunk_overlap=100 )
 
     chunks = splitter.split_documents(docs)
 
-    print("Chunks:", len(chunks))
+    print("Chunks: ",len(chunks))
+    print("Chunks are as follows:\n\n")
+    print(chunks)
 
-    if not chunks:
+    if not chunks:  
         raise ValueError(
             "No SWC documents were found."
         )
 
     # Create FAISS vector store
-    vectorstore = FAISS.from_documents(
-        chunks,
-        embeddings,
-    )
+    vectorstore = FAISS.from_documents(chunks,embeddings)
 
     # -----------------------------------------
     # Persist
     # -----------------------------------------
 
-    persist_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    persist_dir.mkdir( parents=True, exist_ok=True )
 
     vectorstore.save_local(str(persist_dir))
     print("FAISS vector store saved to:", persist_dir)
@@ -120,7 +101,8 @@ def _load_swc_docs():
         loader_cls=TextLoader,
     )
     docs = loader.load()
-    for doc in docs:
+    for i, doc in enumerate(docs):
+        print(f"\n\n doc {i} \n\n", doc)
         swc_id = Path(doc.metadata["source"]).stem  # e.g. "SWC-107"
         doc.metadata["swc_id"] = swc_id
     return docs
