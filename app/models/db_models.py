@@ -1,8 +1,6 @@
 """SQLModel persistence layer for audit runs and their findings."""
-from __future__ import annotations
-
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
@@ -17,7 +15,7 @@ class AuditRun(SQLModel, table=True):
     report_pdf_path: Optional[str] = None
     error_message: Optional[str] = None
 
-    findings: list["FindingRecord"] = Relationship(back_populates="audit_run")
+    findings: List["FindingRecord"] = Relationship(back_populates="audit_run")
 
 
 class FindingRecord(SQLModel, table=True):
@@ -33,6 +31,6 @@ class FindingRecord(SQLModel, table=True):
     plain_explanation: str
     why_it_matters: str
     fix_snippet: str
-    references: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    references: List[str] = Field(default_factory=list, sa_column=Column(JSON))
 
     audit_run: Optional[AuditRun] = Relationship(back_populates="findings")
