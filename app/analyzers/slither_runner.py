@@ -11,6 +11,7 @@ they never share a Python import space.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -35,21 +36,36 @@ def run_slither(target_path: str) -> dict[str, Any]:
     if not target.exists():
         raise FileNotFoundError(f"Target not found: {target_path}")
 
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-        json_out_path = tmp.name
+    slither_exe = settings.SLITHER_BIN
+    # .venv-analysis/Scripts (Windows) or .venv-analysis/bin (Linux/Mac) --
+    # this is where solc-select's `solc` shim also lives. Slither spawns
+    # `solc` as a bare command name internally, so it needs this directory
+    # on PATH for that nested subprocess call to resolve it.
+    venv_scripts_dir = str(Path(slither_exe).parent)
 
-    cmd = [settings.SLITHER_BIN, str(target), "--json", json_out_path]
+    env = os.environ.copy()
+    env["PATH"] = venv_scripts_dir + os.pathsep + env.get("PATH", "")
+
+    # NOTE: we only want a unique *path*, not an actual file on disk --
+    # Slither's --json refuses to overwrite a file that already exists,
+    # and NamedTemporaryFile() creates the file the moment it's called.
+    json_out_path = os.path.join(
+        tempfile.gettempdir(), f"slither_{next(tempfile._get_candidate_names())}.json"
+    )
+
+    cmd = [slither_exe, str(target), "--json", json_out_path]
 
     try:
         proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
+            env=env,
             timeout=settings.SLITHER_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as e:
         raise SlitherExecutionError(
-            f"Could not find slither binary at {settings.SLITHER_BIN}. "
+            f"Could not find slither binary at {slither_exe}. "
             "Did you create .venv-analysis and run `pip install -r "
             "requirements-analysis.txt` inside it? See scripts/setup_venvs.sh."
         ) from e

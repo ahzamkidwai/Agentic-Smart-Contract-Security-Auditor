@@ -1,16 +1,19 @@
 """
-Chroma-backed knowledge base of SWC Registry entries.
+FAISS-backed knowledge base of SWC Registry entries.
 
-build_or_load_vectorstore() is idempotent: if a persisted Chroma DB already
-exists at settings.CHROMA_PERSIST_DIR it's loaded directly; otherwise it's
-built once from the markdown files in data/swc_registry/.
+build_or_load_vectorstore() is idempotent:
+if a persisted FAISS index already exists at
+settings.FAISS_PERSIST_DIR, it is loaded directly;
+otherwise it is built from the markdown files in
+data/swc_registry/.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 
-from langchain_chroma import Chroma
-from langchain_community.document_loaders import DirectoryLoader, TextLoader
+from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import (DirectoryLoader, TextLoader)
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -26,26 +29,87 @@ def get_embeddings():
     return _embeddings
 
 
-def build_or_load_vectorstore() -> Chroma:
-    persist_dir = Path(settings.CHROMA_PERSIST_DIR)
+def build_or_load_vectorstore() -> FAISS:
+    persist_dir = Path(settings.FAISS_PERSIST_DIR)
+    print("Persistent Directory:", persist_dir)
     embeddings = get_embeddings()
 
-    already_built = persist_dir.exists() and any(persist_dir.iterdir())
+    print("Embeddings:", embeddings)
 
-    vectorstore = Chroma(
-        collection_name="swc_registry",
-        embedding_function=embeddings,
-        persist_directory=str(persist_dir),
+    index_file = persist_dir / "index.faiss"
+    metadata_file = persist_dir / "index.pkl"
+
+    already_built = (
+        index_file.exists()
+        and metadata_file.exists()
     )
 
-    if already_built and vectorstore._collection.count() > 0:
+    print("Already Built:", already_built)
+
+    # -----------------------------------------
+    # Load existing FAISS index
+    # -----------------------------------------
+
+    if already_built:
+        print("Loading existing FAISS vector store...")
+
+        vectorstore = FAISS.load_local(
+            str(persist_dir),
+            embeddings,
+            allow_dangerous_deserialization=True,
+        )
+
+        print(
+            "Loaded Vector Store:",
+            vectorstore,
+        )
+
         return vectorstore
 
+    # -----------------------------------------
+    # Build FAISS index
+    # -----------------------------------------
+
+    print("Building FAISS vector store...")
+
     docs = _load_swc_docs()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+
+    print(
+        "Documents:",
+        len(docs),
+    )
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=100,
+    )
+
     chunks = splitter.split_documents(docs)
-    if chunks:
-        vectorstore.add_documents(chunks)
+
+    print("Chunks:", len(chunks))
+
+    if not chunks:
+        raise ValueError(
+            "No SWC documents were found."
+        )
+
+    # Create FAISS vector store
+    vectorstore = FAISS.from_documents(
+        chunks,
+        embeddings,
+    )
+
+    # -----------------------------------------
+    # Persist
+    # -----------------------------------------
+
+    persist_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    vectorstore.save_local(str(persist_dir))
+    print("FAISS vector store saved to:", persist_dir)
     return vectorstore
 
 
