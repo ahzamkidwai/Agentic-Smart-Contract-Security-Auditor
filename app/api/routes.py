@@ -26,6 +26,29 @@ from app.reports.pdf_report import render_pdf
 router = APIRouter()
 
 
+def _read_contract_header(target_path: str, max_lines: int = 30) -> str:
+    """
+    Read the first ``max_lines`` lines of a Solidity file.
+
+    Returns an empty string if target_path is a directory or cannot be read.
+    This gives the LLM visibility into pragma, imports, and contract-level
+    declarations so it can detect already-applied fixes (e.g. ReentrancyGuard
+    already imported) without falsely recommending them again.
+    """
+    from pathlib import Path
+
+    p = Path(target_path)
+    if not p.is_file() or p.suffix.lower() != ".sol":
+        return ""
+    try:
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[:max_lines])
+    except Exception:
+        return ""
+
+
+
+
 class AuditRequest(BaseModel):
     target_path: str  # absolute path to a .sol file or project directory
 
@@ -60,8 +83,16 @@ def _process_audit(run_id: int, target_path: str) -> None:
 
     try:
         raw_output = run_slither(target_path)
-        normalized = normalize_findings(raw_output)
-        raw_findings = [RawFinding(**f) for f in normalized]
+        normalized = normalize_findings(raw_output, target_path=target_path)
+
+        # Read the first 30 lines of the contract so the LLM can detect
+        # already-applied fixes (imports, modifiers, pragma version).
+        contract_header = _read_contract_header(target_path, max_lines=30)
+
+        raw_findings = [
+            RawFinding(**{**f, "contract_header": contract_header})
+            for f in normalized
+        ]
 
         explained = explain_findings(raw_findings)
 
