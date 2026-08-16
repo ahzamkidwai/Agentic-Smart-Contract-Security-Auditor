@@ -1,8 +1,9 @@
+.venv-analysis/
+.venv-app/
+data/chroma_db/
+data/*.db
+outputs/*.pdf
 __pycache__/
 *.pyc
 .env
-data/
-*.egg-info/
 .pytest_cache/
-venv/
-.venv/

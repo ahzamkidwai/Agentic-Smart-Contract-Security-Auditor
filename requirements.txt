@@ -1,36 +1,28 @@
-# Static analysis
-slither-analyzer
-mythril
-solc-select
+# .venv-app -- modern AI/web stack. NEVER install requirements-analysis.txt
+# into this same environment; that's the whole point of the split (see
+# config.py docstring).
 
-# LangChain / LangGraph
+fastapi
+uvicorn[standard]
+sqlmodel
+pydantic
+pydantic-settings
+python-dotenv
+
 langchain
+langchain-core
 langchain-community
+langchain-text-splitters
+langchain-chroma
 langchain-huggingface
 langchain-groq
+langchain-google-genai
 langgraph
 
-# Vector store / embeddings
 chromadb
 sentence-transformers
 
-# Schemas
-pydantic
-
-# Report generation
-jinja2
-markdown2
 weasyprint
+jinja2
 
-# API + persistence
-fastapi
-uvicorn[standard]
-python-multipart
-sqlmodel
-
-# Utilities
-python-dotenv
-gitpython
-
-# Testing
-pytest
+faiss-cpu
