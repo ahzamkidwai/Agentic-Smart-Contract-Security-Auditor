@@ -32,5 +32,8 @@ class FindingRecord(SQLModel, table=True):
     why_it_matters: str
     fix_snippet: str
     references: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    related_finding_ids: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    severity_rationale: str = ""
+    applicability_note: str = ""
 
     audit_run: Optional[AuditRun] = Relationship(back_populates="findings")
