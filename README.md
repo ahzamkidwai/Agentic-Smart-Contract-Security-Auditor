@@ -189,7 +189,7 @@ Visit `http://127.0.0.1:8000/docs` for interactive Swagger docs.
 ```bash
 curl -X POST http://127.0.0.1:8000/api/audit \
   -H "Content-Type: application/json" \
-  -d '{"target_path": "'"$(pwd)"'/tests/sample_contracts/VulnerableBank.sol"}'
+  -d '{"target_path": "'"$(cygpath -m "$(pwd)")"'/tests/sample_contracts/VulnerableBank.sol"}'
 ```
 
 ```json
