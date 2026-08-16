@@ -1,45 +1,243 @@
 """
-RAG chain: retriever (SWC Registry / Chroma) -> prompt -> LLM ->
+RAG chain: retriever (SWC Registry / FAISS) -> prompt -> LLM ->
 PydanticOutputParser -> ExplainedFinding.
 
 Built with modern LangChain Expression Language (LCEL) pipe syntax rather
 than the legacy `RetrievalQA` chain class (which is in maintenance mode).
-Behaviorally it's the same "retrieve, stuff into the prompt, generate"
-pattern, just composed explicitly.
+
+Key design decisions to prevent hallucination and inaccurate output:
+  * Temperature = 0 — deterministic, low creativity.
+  * Flagged source lines are injected into the prompt — the LLM can only
+    reason about code it can actually see.
+  * The contract's import/pragma header is injected — allows the LLM to
+    detect already-applied fixes (e.g. ReentrancyGuard already imported).
+  * SWC-pinned retrieval — the retriever prioritises the SWC doc that
+    corresponds to Slither's own mapping, rather than picking any
+    semantically-close doc.
+  * Strict grounding constraints in the prompt — the LLM is told to explain
+    only the reported finding, not to invent new ones, and to check whether
+    the fix is already present before recommending it.
 """
 from __future__ import annotations
+
+import re
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
+from app.chains.applicability import (
+    check_low_level_call_return_handling,
+    check_tx_origin_usage,
+    evidence_facts_block,
+    extract_reentrancy_evidence,
+)
+from app.chains.compiler_analysis import analyze_solc_version_finding
+from app.chains.correlation import correlate_findings
+from app.chains import autofix
 from app.chains.schemas import ExplainedFinding, RawFinding
-from app.knowledge_base.vectorstore import get_retriever
+from app.chains.severity import reassess_severity
+from app.knowledge_base.vectorstore import get_retriever_for_check
 from config import settings
 
+# ---------------------------------------------------------------------------
+# Prompt template
+# ---------------------------------------------------------------------------
+
 _PROMPT = ChatPromptTemplate.from_template(
-    """You are a smart-contract security auditor explaining a static-analysis
-finding to a junior developer who has no security background.
+    """\
+You are an expert smart-contract security auditor producing a structured
+explanation of a *single* static-analysis finding reported by Slither.
 
-Use the SWC Registry context below ONLY to ground your explanation in the
-correct vulnerability class. Do not invent SWC IDs that aren't supported
-by the context.
+════════════════════════════════════════════════════════
+STRICT RULES — follow every rule, no exceptions:
+1. Explain ONLY the finding described below.  Do NOT invent additional
+   findings or speculate about vulnerabilities not reported by Slither.
+2. Base your explanation solely on the FLAGGED SOURCE LINES and SWC CONTEXT
+   provided.  Do not reason about code that is not shown.
+3. Before writing the fix_snippet, check the CONTRACT HEADER for imports
+   and modifiers.  If the standard fix is already present (e.g.
+   `nonReentrant` modifier is used, `SafeERC20` is imported, Solidity
+   >=0.8.0 is declared), set fix_already_present=true and write
+   "Fix already applied: <reason>" in fix_snippet instead of repeating it.
+4. Only include SWC IDs in the `references` list that appear verbatim in the
+   SWC CONTEXT below.  If the context is irrelevant to this detector, leave
+   `references` empty.
+5. Do not copy the raw Slither description verbatim into plain_explanation;
+   rewrite it in plain English for a junior developer.
+6. If SWC REGISTRY CONTEXT below says "(No relevant SWC Registry entry found
+   for this detector.)", this detector has NO established SWC mapping.
+   Do not borrow language, risk scenarios, or terminology from a *different*
+   vulnerability class just because it sounds related. Describe only what
+   this specific detector actually flags. In particular, do not describe a
+   "silent failure" or "unchecked return value" risk unless the flagged
+   source lines you were given actually omit a return-value check.
+7. DETECTOR SCOPE below states precisely what "{check}" does and does not
+   check for. The flagged source lines may also happen to show OTHER
+   patterns (e.g. a low-level call that is also ordered before a state
+   write) — but if that other pattern is outside this detector's scope,
+   do not describe or remediate it here. It either belongs to a different
+   finding in this same report, or it isn't a real issue at all; either
+   way, repeating it here is redundant and dilutes the report. Stay
+   strictly inside DETECTOR SCOPE.
+8. For "solc-version" findings specifically: Slither only reports this
+   because the flagged pragma constraint is CURRENTLY in the source — by
+   definition the fix (upgrading the pragma) is NOT yet applied. Never set
+   fix_already_present=true and never write "Fix already applied" for this
+   detector, even with hedging like "already using a relatively recent
+   version."
+9. GROUND TRUTH FACTS below were computed deterministically (regex/parser
+   checks against the actual source, or an authoritative external
+   database) — NOT generated by an LLM. Treat every statement in that
+   section as verified fact. If it contradicts an assumption you were
+   about to make (e.g. it says a return value IS checked, or a compiler
+   bug is NOT triggerable by this source), defer to it — do not hedge
+   around it or restate the opposite.
+════════════════════════════════════════════════════════
 
-SWC Registry context:
+── DETECTOR SCOPE ────────────────────────────────────
+{check_scope_note}
+──────────────────────────────────────────────────────
+
+── GROUND TRUTH FACTS (deterministically verified — not an LLM guess) ──
+{ground_truth_facts}
+──────────────────────────────────────────────────────
+
+── SWC REGISTRY CONTEXT ──────────────────────────────
 {context}
+──────────────────────────────────────────────────────
 
-Finding to explain (raw Slither output):
-- check: {check}
-- title: {title}
-- severity: {severity}
-- description: {description}
-- affected elements: {elements}
+── CONTRACT HEADER (first lines — imports, pragma, declarations) ──
+{contract_header}
+──────────────────────────────────────────────────────
+
+── FLAGGED SOURCE LINES ──────────────────────────────
+{source_lines}
+──────────────────────────────────────────────────────
+
+── FINDING ───────────────────────────────────────────
+Detector  : {check}
+Severity  : {severity}
+Confidence: {confidence}
+Description (raw Slither output):
+{description}
+Affected elements: {elements}
+──────────────────────────────────────────────────────
 
 {format_instructions}
 
-Respond with ONLY the JSON object, no preamble, no markdown fences.
+Respond with ONLY the JSON object — no preamble, no markdown fences.
 """
 )
+
+
+# Checks where "fix already applied" is never a coherent answer — Slither
+# only fires these because the flagged condition is currently true in the
+# source, and there is no in-place mitigation short of the fix itself.
+_NEVER_ALREADY_APPLIED_CHECKS = {"solc-version"}
+
+
+# ---------------------------------------------------------------------------
+# Detector scope notes.
+#
+# Several Slither checks sit right next to each other conceptually — most
+# notably "low-level-calls" (fires on ANY raw .call/.delegatecall/
+# .staticcall, regardless of ordering or return-value handling) vs
+# "reentrancy-eth" (specifically flags state writes AFTER an external call)
+# vs "unchecked-lowlevel" (specifically flags a missing return-value check).
+# All three can point at the exact same line of code. Once source context
+# was widened to show the whole enclosing function (so the LLM could see
+# things like an adjacent require() check), the LLM started re-deriving the
+# reentrancy risk on its own for the *low-level-calls* finding too — because
+# it's genuinely visible in the code, just outside what that detector
+# checks for. That produces redundant, near-duplicate remediation advice
+# across two separate findings in the same report.
+#
+# These short, authoritative notes keep each detector's explanation
+# confined to what it actually checks for, even when the surrounding code
+# happens to also exhibit a different, separately-reported issue.
+# ---------------------------------------------------------------------------
+_CHECK_SCOPE_NOTES: dict[str, str] = {
+    "low-level-calls": (
+        "Flags ANY use of a raw .call/.delegatecall/.staticcall. This is "
+        "purely informational: low-level calls do not automatically revert "
+        "on failure the way a normal function call or .transfer()/.send() "
+        "does, so the caller must manually check the returned boolean. "
+        "This detector does NOT evaluate whether the call happens before "
+        "or after a state update — that is a separate concern (see "
+        "reentrancy-* detectors) and must not be discussed here, even if "
+        "you can see it in the surrounding code."
+    ),
+    "unchecked-lowlevel": (
+        "Flags a low-level call whose boolean success value is NOT checked "
+        "(no require/if on the returned `ok`). If the flagged source lines "
+        "show the return value IS checked, this specific detector's "
+        "concern has been addressed — say so plainly."
+    ),
+    "reentrancy-eth": (
+        "Flags a function that sends ETH via an external call BEFORE "
+        "updating the state variables that call could re-enter through. "
+        "The fix is the Checks-Effects-Interactions pattern: update state "
+        "before the external call. This detector's concern is ORDERING, "
+        "not whether the call's return value is checked."
+    ),
+    "reentrancy-no-eth": (
+        "Same ordering concern as reentrancy-eth (external call before "
+        "state update), but for calls that don't send ETH — e.g. calls "
+        "into another contract that could re-enter."
+    ),
+    "solc-version": (
+        "Flags use of a Solidity compiler version/pragma range with known "
+        "compiler bugs. The only real fix is changing the pragma line to a "
+        "version outside the affected range — there is no code-level "
+        "workaround, and the finding cannot be 'already fixed' while the "
+        "flagged pragma is still present."
+    ),
+    "immutable-states": (
+        "Flags a state variable that is only ever assigned in the "
+        "constructor and never reassigned afterward — it should be marked "
+        "`immutable` for a gas-cost reduction. This is a gas optimization, "
+        "not a security vulnerability; do not describe an exploit "
+        "scenario for it."
+    ),
+    "tx-origin": (
+        "Flags use of tx.origin for authorization/authentication checks. "
+        "tx.origin is the original external account that started the "
+        "transaction, which can differ from msg.sender inside a call "
+        "chain — a malicious intermediate contract can trick this check."
+    ),
+}
+
+
+def _check_scope_note(check: str) -> str:
+    return _CHECK_SCOPE_NOTES.get(
+        check,
+        f"No canonical scope note is on file for '{check}'. Rely only on "
+        "the raw Slither description below to determine exactly what this "
+        "detector checks for, and do not describe risks outside that scope "
+        "even if visible elsewhere in the shown code.",
+    )
+
+
+def _ground_truth_facts(finding: RawFinding) -> str:
+    """
+    Dispatches to the right deterministic applicability/evidence checker
+    for this detector (see applicability.py / compiler_analysis.py) and
+    returns a ready-to-inject prompt block. Returns a neutral placeholder
+    for checks with no dedicated verifier — the prompt rule (#9) only
+    binds the LLM when there IS something here to defer to.
+    """
+    if finding.check == "solc-version":
+        analysis = analyze_solc_version_finding(finding.description, finding.full_source)
+        return analysis.facts_block
+    if finding.check in ("low-level-calls", "unchecked-lowlevel"):
+        return check_low_level_call_return_handling(finding.source_lines).facts_block
+    if finding.check == "tx-origin":
+        return check_tx_origin_usage(finding.source_lines).facts_block
+    if finding.check in ("reentrancy-eth", "reentrancy-no-eth"):
+        block = evidence_facts_block(finding.check, finding.description)
+        return block or "(No structured evidence could be parsed for this finding.)"
+    return "(No deterministic verifier is available for this detector — rely on the raw Slither description and shown source only.)"
 
 
 def _get_llm():
@@ -49,7 +247,7 @@ def _get_llm():
         return ChatGroq(
             model=settings.GROQ_MODEL,
             api_key=settings.GROQ_API_KEY,
-            temperature=0.1,
+            temperature=0,
         )
     elif settings.LLM_PROVIDER == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -57,27 +255,143 @@ def _get_llm():
         return ChatGoogleGenerativeAI(
             model=settings.GEMINI_MODEL,
             google_api_key=settings.GOOGLE_API_KEY,
-            temperature=0.1,
+            temperature=0,
         )
     raise ValueError(f"Unknown LLM_PROVIDER: {settings.LLM_PROVIDER}")
 
 
 def _format_docs(docs) -> str:
+    if not docs:
+        return "(No relevant SWC Registry entry found for this detector.)"
     return "\n\n---\n\n".join(
         f"[{d.metadata.get('swc_id', 'unknown')}]\n{d.page_content}" for d in docs
     )
 
 
+# ---------------------------------------------------------------------------
+# fix_snippet validation & repair.
+#
+# Asking an LLM to hand back Solidity code (which itself contains string
+# literals like `""`) as an escaped field inside a JSON object occasionally
+# drops or mismatches a delimiter during escaping — e.g. we've seen
+# `msg.sender.call{value: amount}(");` come back missing a closing quote.
+# A full solc parse would need the snippet wrapped in a valid contract,
+# which is unreliable for partial patches; a cheap, robust net instead is
+# a delimiter-balance check with one repair attempt before falling back to
+# a clearly-flagged manual-review message rather than shipping broken code
+# silently into the PDF/JSON report.
+# ---------------------------------------------------------------------------
+
+_PAIRS = {")": "(", "}": "{", "]": "["}
+_OPENERS = set(_PAIRS.values())
+_CLOSERS = set(_PAIRS.keys())
+
+# `address.call(...)` / `.delegatecall(...)` / `.staticcall(...)` always
+# require exactly one bytes argument (even if empty, `("")`) — there is no
+# zero-argument overload in Solidity. This is a distinct failure mode from
+# delimiter imbalance: `.call{value: amount}()` has perfectly balanced
+# parens/braces (so _check_balance passes it) but still won't compile.
+# We've seen the LLM drop the `""` payload both by mangling a quote
+# (caught by _check_balance) and by omitting the whole argument (caught
+# here) — so both checks run on every fix_snippet.
+_EMPTY_CALL_ARGS_RE = re.compile(r"\.(call|delegatecall|staticcall)\s*(\{[^{}]*\})?\s*\(\s*\)")
+
+
+def _check_balance(snippet: str) -> tuple[bool, str]:
+    """Delimiter/quote balance check, escape- and string-literal-aware."""
+    stack: list[str] = []
+    in_str: str | None = None
+    i = 0
+    while i < len(snippet):
+        ch = snippet[i]
+        if in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            in_str = ch
+            i += 1
+            continue
+        if ch in _OPENERS:
+            stack.append(ch)
+        elif ch in _CLOSERS:
+            if not stack or stack[-1] != _PAIRS[ch]:
+                return False, f"unmatched '{ch}' at position {i}"
+            stack.pop()
+        i += 1
+
+    if in_str:
+        return False, f"unterminated {in_str!r} string literal"
+    if stack:
+        return False, f"unclosed '{stack[-1]}'"
+    return True, ""
+
+
+def _validate_fix_snippet(snippet: str) -> tuple[bool, str]:
+    """Runs all fix_snippet checks: delimiter balance + known Solidity
+    footguns (currently: missing required argument on low-level calls)."""
+    ok, reason = _check_balance(snippet)
+    if not ok:
+        return ok, reason
+    m = _EMPTY_CALL_ARGS_RE.search(snippet)
+    if m:
+        return False, (
+            f"'.{m.group(1)}(...)' is missing its required bytes argument "
+            '(use `("")` for an empty payload — Solidity has no zero-argument '
+            "overload of call/delegatecall/staticcall)"
+        )
+    return True, ""
+
+
+def _repair_fix_snippet(llm, broken_snippet: str, reason: str, check: str) -> str | None:
+    """One repair attempt: ask the LLM to fix only the delimiter/quoting
+    issue, preserving the code's meaning. Returns the repaired snippet, or
+    None if the repair itself fails validation."""
+    repair_prompt = (
+        "The following Solidity code snippet, generated as a security-fix "
+        f"suggestion for a '{check}' finding, has a syntax problem: {reason}.\n\n"
+        "Snippet:\n"
+        f"{broken_snippet}\n\n"
+        "Return ONLY the corrected Solidity code with the delimiter/quoting "
+        "issue fixed. Do not change the logic. No markdown fences, no "
+        "explanation, no preamble — just the corrected code."
+    )
+    try:
+        response = llm.invoke(repair_prompt)
+        repaired = getattr(response, "content", str(response)).strip()
+        repaired = repaired.strip("`").strip()
+        ok, _ = _check_balance(repaired)
+        return repaired if ok else None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Chain builder
+# ---------------------------------------------------------------------------
+
 def build_explainer_chain():
     """Builds the LCEL pipeline once so it can be reused across findings."""
-    retriever = get_retriever(k=3)
     llm = _get_llm()
     parser = PydanticOutputParser(pydantic_object=ExplainedFinding)
 
     def retrieve_context(inputs: dict) -> dict:
+        retrieve = get_retriever_for_check(
+            check=inputs["check"],
+            swc_id=inputs.get("swc_id"),
+            k=3,
+        )
         query = f"{inputs['check']} {inputs['description']}"
-        docs = retriever.invoke(query)
-        return {**inputs, "context": _format_docs(docs)}
+        docs = retrieve(query)
+        return {
+            **inputs,
+            "context": _format_docs(docs),
+            "check_scope_note": _check_scope_note(inputs["check"]),
+        }
 
     chain = (
         RunnableLambda(retrieve_context)
@@ -91,16 +405,24 @@ def build_explainer_chain():
     return chain
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def _finding_to_chain_input(finding: RawFinding) -> dict:
     elements_str = (
         ", ".join(e.get("name", "?") for e in finding.elements if e.get("name")) or "n/a"
     )
     return {
         "check": finding.check,
-        "title": finding.title,
         "severity": finding.severity,
+        "confidence": finding.confidence,
         "description": finding.description,
         "elements": elements_str,
+        "source_lines": finding.source_lines or "(source lines unavailable)",
+        "contract_header": finding.contract_header or "(contract header unavailable)",
+        "swc_id": finding.swc_id,
+        "ground_truth_facts": _ground_truth_facts(finding),
     }
 
 
@@ -110,13 +432,107 @@ def explain_findings(findings: list[RawFinding]) -> list[ExplainedFinding]:
         return []
 
     chain = build_explainer_chain()
+    repair_llm = None  # lazily created only if a repair is actually needed
     results: list[ExplainedFinding] = []
+
+    # Correlate once across the whole batch (needs every finding's flagged
+    # lines, not just the one currently being explained) — see
+    # correlation.py for why this matters (reentrancy-eth and
+    # low-level-calls firing on the same call site shouldn't read as two
+    # unrelated vulnerabilities).
+    related_map = correlate_findings(findings)
 
     for f in findings:
         explained: ExplainedFinding = chain.invoke(_finding_to_chain_input(f))
         explained.finding_id = f.id
-        if f.swc_id and f.swc_id not in explained.references:
-            explained.references.append(f.swc_id)
+
+        # --- fix_snippet validation & one-shot repair --------------------
+        ok, reason = _validate_fix_snippet(explained.fix_snippet)
+        if not ok:
+            if repair_llm is None:
+                repair_llm = _get_llm()
+            repaired = _repair_fix_snippet(repair_llm, explained.fix_snippet, reason, f.check)
+            if repaired is not None and _validate_fix_snippet(repaired)[0]:
+                explained.fix_snippet = repaired
+            else:
+                # Repair failed too — don't ship broken code silently.
+                explained.fix_snippet = (
+                    "⚠️ Automatic fix generation failed validation "
+                    f"({reason}) and could not be auto-repaired. Manual "
+                    "review required. Raw model output:\n" + explained.fix_snippet
+                )
+
+        # --- "Fix already applied" guardrail for checks where that framing
+        # is never valid ----------------------------------------------------
+        if f.check in _NEVER_ALREADY_APPLIED_CHECKS:
+            explained.fix_already_present = False
+            if explained.fix_snippet.strip().lower().startswith("fix already applied"):
+                _, _, remainder = explained.fix_snippet.partition(":")
+                explained.fix_snippet = remainder.strip() or explained.fix_snippet
+
+        # --- Deterministic SWC guardrail --------------------------------
+        explained.references = [f.swc_id] if f.swc_id else []
+
+        # --- Applicability / evidence / severity / autofix (deterministic,
+        # per-check) -------------------------------------------------------
+        explained.related_finding_ids = related_map.get(f.id, [])
+
+        if f.check == "solc-version":
+            analysis = analyze_solc_version_finding(f.description, f.full_source)
+            assessment = reassess_severity(
+                f.check, explained.severity or f.severity,
+                compiler_all_not_applicable=analysis.all_confirmed_not_applicable,
+            )
+            explained.severity = assessment.adjusted
+            explained.severity_rationale = assessment.rationale
+            if analysis.all_confirmed_not_applicable:
+                explained.applicability_note = analysis.facts_block
+            templated_fix = autofix.autofix_solc_version(analysis.recommended_min_version)
+            if templated_fix and _validate_fix_snippet(templated_fix)[0]:
+                explained.fix_snippet = templated_fix
+
+        elif f.check in ("low-level-calls", "unchecked-lowlevel"):
+            applicability = check_low_level_call_return_handling(f.source_lines)
+            assessment = reassess_severity(
+                f.check, explained.severity or f.severity,
+                applicability_facts=applicability.facts,
+            )
+            explained.severity = assessment.adjusted
+            explained.severity_rationale = assessment.rationale
+            explained.evidence = applicability.facts
+            if f.check == "unchecked-lowlevel" and applicability.facts.get("checked") is True:
+                explained.fix_already_present = True
+
+        elif f.check == "tx-origin":
+            applicability = check_tx_origin_usage(f.source_lines)
+            assessment = reassess_severity(
+                f.check, explained.severity or f.severity,
+                applicability_facts=applicability.facts,
+            )
+            explained.severity = assessment.adjusted
+            explained.severity_rationale = assessment.rationale
+            explained.evidence = applicability.facts
+            if not explained.fix_already_present:
+                templated_fix = autofix.autofix_tx_origin(f.source_lines)
+                if templated_fix and _validate_fix_snippet(templated_fix)[0]:
+                    explained.fix_snippet = templated_fix
+
+        elif f.check in ("reentrancy-eth", "reentrancy-no-eth"):
+            evidence = extract_reentrancy_evidence(f.description)
+            explained.evidence = evidence
+            assessment = reassess_severity(
+                f.check, explained.severity or f.severity,
+                contract_header=f.contract_header,
+            )
+            explained.severity = assessment.adjusted
+            explained.severity_rationale = assessment.rationale
+            if not explained.fix_already_present and "call_line" in evidence:
+                templated_fix = autofix.autofix_reentrancy_cei(
+                    f.source_lines, evidence["call_line"], evidence["write_line"]
+                )
+                if templated_fix and _validate_fix_snippet(templated_fix)[0]:
+                    explained.fix_snippet = templated_fix
+
         results.append(explained)
 
     return results
