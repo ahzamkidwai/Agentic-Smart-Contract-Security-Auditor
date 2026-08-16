@@ -47,6 +47,29 @@ def _read_contract_header(target_path: str, max_lines: int = 30) -> str:
         return ""
 
 
+_MAX_FULL_SOURCE_BYTES = 300_000  # sanity cap; typical contracts are a few KB
+
+
+def _read_full_source(target_path: str) -> str:
+    """
+    Read the entire contract file for deterministic, programmatic checks
+    (e.g. compiler_analysis's regex trigger-condition matching) — this is
+    NOT injected into the LLM prompt wholesale, only used in Python logic,
+    so there's no prompt-size concern; only a sanity cap against
+    pathological input.
+    """
+    from pathlib import Path
+
+    p = Path(target_path)
+    if not p.is_file() or p.suffix.lower() != ".sol":
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        return text[:_MAX_FULL_SOURCE_BYTES]
+    except Exception:
+        return ""
+
+
 
 
 class AuditRequest(BaseModel):
@@ -88,9 +111,10 @@ def _process_audit(run_id: int, target_path: str) -> None:
         # Read the first 30 lines of the contract so the LLM can detect
         # already-applied fixes (imports, modifiers, pragma version).
         contract_header = _read_contract_header(target_path, max_lines=30)
+        full_source = _read_full_source(target_path)
 
         raw_findings = [
-            RawFinding(**{**f, "contract_header": contract_header})
+            RawFinding(**{**f, "contract_header": contract_header, "full_source": full_source})
             for f in normalized
         ]
 
@@ -124,6 +148,9 @@ def _process_audit(run_id: int, target_path: str) -> None:
                         why_it_matters=exp.why_it_matters,
                         fix_snippet=exp.fix_snippet,
                         references=exp.references,
+                        related_finding_ids=exp.related_finding_ids,
+                        severity_rationale=exp.severity_rationale,
+                        applicability_note=exp.applicability_note,
                     )
                 )
             session.commit()

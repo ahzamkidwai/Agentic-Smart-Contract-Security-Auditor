@@ -20,6 +20,10 @@ class RawFinding(BaseModel):
     # declaration) so the LLM can detect already-applied fixes such as
     # `import "@openzeppelin/contracts/security/ReentrancyGuard.sol"`.
     contract_header: str = ""
+    # Full contract source — used programmatically (not injected wholesale
+    # into the LLM prompt) by deterministic applicability checks such as
+    # compiler_analysis's regex-based bug-trigger detection.
+    full_source: str = ""
 
 
 class ExplainedFinding(BaseModel):
@@ -61,6 +65,47 @@ class ExplainedFinding(BaseModel):
             "SWC IDs that directly describe this finding. "
             "Only include IDs that appear in the retrieved SWC context. "
             "Leave empty if the context is irrelevant or no match exists."
+        ),
+    )
+    # --- Fields populated deterministically by post-processing, not by the
+    # LLM (the LLM leaves these at their defaults; explain_findings fills
+    # them in from applicability.py / correlation.py / severity.py). ---
+    evidence: dict = Field(
+        default_factory=dict,
+        description=(
+            "Structured facts extracted directly from Slither's own output "
+            "(line numbers, variable names, call/write ordering) rather "
+            "than free-text LLM narration — guaranteed to match the "
+            "underlying detector's data exactly."
+        ),
+    )
+    related_finding_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "IDs of other findings in this same report that share flagged "
+            "source lines with this one (e.g. reentrancy-eth and "
+            "low-level-calls firing on the same call site) — these are "
+            "related facets of one code path, not independent issues."
+        ),
+    )
+    severity_rationale: str = Field(
+        default="",
+        description=(
+            "Why `severity` is what it is, when it was adjusted from the "
+            "detector's default by the deterministic severity-reassessment "
+            "rules (guarded/unguarded, return-value-checked, compiler-bug "
+            "applicability, etc.)."
+        ),
+    )
+    applicability_note: str = Field(
+        default="",
+        description=(
+            "Set when a deterministic applicability check found the "
+            "finding likely does not apply as reported (e.g. a compiler "
+            "bug whose trigger condition is absent from the source) — "
+            "explains why, so the reader isn't left trusting a raw "
+            "detector hit that's been mechanically shown to be a false "
+            "positive for this specific contract."
         ),
     )
 
