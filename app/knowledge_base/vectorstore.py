@@ -123,9 +123,39 @@ def get_retriever_for_check(
             if pinned:
                 return pinned[:k]
 
-        # Fall back: re-query with the detector name to get a focused result
+        # `swc_id is None` means SLITHER_CHECK_TO_SWC has *explicitly* recorded
+        # that this detector has no reliable SWC mapping (see the table's
+        # docstring). Running a generic semantic fallback here is how
+        # unrelated-but-lexically-similar SWC docs (e.g. "low-level-calls"
+        # pulling in SWC-104 because both mention "return value") end up in
+        # the LLM's context and get hallucinated into `references`.
+        # No context beats misleading context — return nothing instead.
+        if swc_id is None and check in _CONFIRMED_NO_SWC_CHECKS:
+            return []
+
+        # Fall back: re-query with the detector name, but only keep hits
+        # that clear a similarity bar. Below the bar we'd rather tell the
+        # LLM "no relevant SWC entry" than hand it a tangential match.
         fallback_query = f"{check} {query}"
-        fallback = vs.similarity_search(fallback_query, k=k)
-        return fallback
+        scored = vs.similarity_search_with_relevance_scores(fallback_query, k=k)
+        return [doc for doc, score in scored if score >= _MIN_RELEVANCE_SCORE]
 
     return _retrieve
+
+
+# Checks where SLITHER_CHECK_TO_SWC pins swc_id=None on purpose (see that
+# table's docstring) — for these, skip semantic fallback entirely rather
+# than risk pulling in a lexically-similar but conceptually wrong SWC doc.
+_CONFIRMED_NO_SWC_CHECKS = {
+    "missing-zero-check",
+    "events-maths",
+    "events-access",
+    "low-level-calls",
+    "assembly",
+    "dead-code",
+}
+
+# Below this cosine-similarity score, a semantic-fallback hit is treated as
+# noise rather than a real match. Tune against your own corpus if you add
+# more SWC docs; 0.35 was calibrated against the current 7-doc registry.
+_MIN_RELEVANCE_SCORE = 0.35
