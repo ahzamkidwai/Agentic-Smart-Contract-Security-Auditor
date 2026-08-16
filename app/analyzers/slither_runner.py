@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -179,47 +180,173 @@ SLITHER_CHECK_TO_SWC: dict[str, str] = {
 }
 
 
-def _extract_source_lines(element: dict, target_path: str) -> str:
+# ---------------------------------------------------------------------------
+# Source-context extraction.
+#
+# Earlier versions extracted *only* the exact lines Slither flagged for each
+# element. That starved the LLM of context: e.g. a "low-level-calls" element
+# flagging just the call-site line wouldn't include the require() checking
+# its return value one line below, and the model would confidently (and
+# wrongly) claim the return value was unhandled.
+#
+# This version instead resolves each flagged line to its *enclosing
+# function/modifier/constructor body* (best-effort brace-depth scan — not a
+# full Solidity parser, but sufficient for realistic single-file contracts),
+# marks the specific flagged line(s) with a ">>>" prefix inside that block,
+# and — critically — groups all of a finding's elements by their resolved
+# block *before* rendering, so a finding with multiple elements landing in
+# the same function (e.g. reentrancy-eth's call-site + state-write elements)
+# produces ONE annotated block with both lines marked, not two near-duplicate
+# copies of the same function with different lines starred.
+# ---------------------------------------------------------------------------
+
+_FUNC_SIG_RE = re.compile(
+    r"^\s*(function\s+\w+|constructor|modifier\s+\w+|fallback\s*\(|receive\s*\()"
+)
+
+
+def _strip_line_for_brace_count(line: str) -> str:
     """
-    Extract the flagged source lines from a Slither element's source_mapping.
-
-    Returns a compact string like:
-        "Line 42-45 of MyContract.sol:\n    balances[msg.sender] -= amount;\n    (bool ok,) = ..."
-    or an empty string if the mapping is unavailable / the file can't be read.
+    Blank out string-literal contents (best-effort, backslash-escape aware)
+    and trailing `//` comments so braces inside them don't throw off depth
+    counting. Not a full lexer, but adequate for typical Solidity source.
     """
-    sm = element.get("source_mapping", {})
-    filename = sm.get("filename_relative") or sm.get("filename_absolute", "")
-    lines_obj = sm.get("lines")
+    out: list[str] = []
+    in_str: str | None = None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            in_str = ch
+            i += 1
+            continue
+        if line[i : i + 2] == "//":
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
-    if not filename or not lines_obj:
-        return ""
 
+def _find_enclosing_block(
+    all_lines: list[str],
+    flagged_start_0based: int,
+    flagged_end_0based: int,
+    max_backward: int = 80,
+    max_forward: int = 400,
+) -> tuple[int, int] | None:
+    """
+    Locate the function/modifier/constructor body containing the flagged
+    line range. Returns (block_start_0based, block_end_0based) inclusive,
+    or None if no enclosing signature could be confidently located within
+    the search window.
+    """
+    sig_start = None
+    lo = max(0, flagged_start_0based - max_backward)
+    for i in range(flagged_start_0based, lo - 1, -1):
+        if _FUNC_SIG_RE.match(all_lines[i]):
+            sig_start = i
+            break
+    if sig_start is None:
+        return None
+
+    depth = 0
+    body_opened = False
+    hi = min(len(all_lines), flagged_end_0based + max_forward)
+    for i in range(sig_start, hi):
+        stripped = _strip_line_for_brace_count(all_lines[i])
+        depth += stripped.count("{")
+        depth -= stripped.count("}")
+        if "{" in stripped:
+            body_opened = True
+        if body_opened and depth <= 0:
+            return (sig_start, i)
+    return None
+
+
+# Cap on the fallback (no enclosing function found) context window, so a
+# finding whose flagged lines already span a wide range doesn't balloon
+# into dumping most of the file into the prompt.
+_FALLBACK_CONTEXT_LINES = 3
+_FALLBACK_MAX_SPAN = 40
+
+
+def _collect_flagged_lines_by_file(
+    elements: list[dict], target_path: str
+) -> dict[Path, set[int]]:
+    """Union every element's flagged (1-based) line numbers, grouped by file."""
+    by_file: dict[Path, set[int]] = {}
+    for el in elements:
+        sm = el.get("source_mapping", {})
+        filename = sm.get("filename_relative") or sm.get("filename_absolute", "")
+        lines_obj = sm.get("lines")
+        if not filename or not lines_obj:
+            continue
+        filepath = _resolve_filepath(filename, target_path)
+        if filepath is None:
+            continue
+        by_file.setdefault(filepath, set()).update(lines_obj)
+    return by_file
+
+
+def _resolve_filepath(filename: str, target_path: str) -> Path | None:
+    candidate = Path(target_path)
+    base = candidate.parent if candidate.is_file() else candidate
+    filepath = base / filename
+    if not filepath.exists():
+        filepath = Path(filename)  # try as absolute / cwd-relative
+    return filepath if filepath.exists() else None
+
+
+def _render_annotated_blocks(filepath: Path, flagged_lines_1based: set[int]) -> str:
+    """
+    Group the given (1-based) flagged line numbers by their resolved
+    enclosing block, then render one ">>>"-annotated snippet per distinct
+    block (deduplicated — multiple flagged lines in the same function
+    collapse into a single block with multiple markers).
+    """
     try:
-        # Prefer the relative path resolved from the target location.
-        candidate = Path(target_path)
-        if candidate.is_file():
-            base = candidate.parent
-        else:
-            base = candidate
-        filepath = base / filename
-        if not filepath.exists():
-            filepath = Path(filename)  # try as absolute / cwd-relative
-        if not filepath.exists():
-            return ""
-
         all_lines = filepath.read_text(encoding="utf-8", errors="replace").splitlines()
-        # lines_obj is a list of 1-based line numbers
-        start = min(lines_obj) - 1  # convert to 0-based
-        end = max(lines_obj)        # slicing end is exclusive
-        snippet = "\n".join(all_lines[start:end])
-        line_range = (
-            f"Line {min(lines_obj)}"
-            if min(lines_obj) == max(lines_obj)
-            else f"Lines {min(lines_obj)}-{max(lines_obj)}"
-        )
-        return f"{line_range} of {filename}:\n{snippet}"
     except Exception:
         return ""
+
+    # block_bounds -> set of 0-based line indices to mark within it
+    blocks: dict[tuple[int, int], set[int]] = {}
+    for ln in sorted(flagged_lines_1based):
+        idx = ln - 1
+        if not (0 <= idx < len(all_lines)):
+            continue
+        bounds = _find_enclosing_block(all_lines, idx, idx)
+        if bounds is None:
+            start = max(0, idx - _FALLBACK_CONTEXT_LINES)
+            end = min(len(all_lines) - 1, idx + _FALLBACK_CONTEXT_LINES)
+            if end - start > _FALLBACK_MAX_SPAN:
+                end = start + _FALLBACK_MAX_SPAN
+            bounds = (start, end)
+        blocks.setdefault(bounds, set()).add(idx)
+
+    rendered: list[str] = []
+    for (b_start, b_end), marked in sorted(blocks.items()):
+        marked_1based = sorted(i + 1 for i in marked)
+        line_desc = (
+            f"line {marked_1based[0]}"
+            if len(marked_1based) == 1
+            else f"lines {', '.join(str(n) for n in marked_1based)}"
+        )
+        out = [f"Flagged {line_desc} (marked >>>) of {filepath.name}:"]
+        for i in range(b_start, b_end + 1):
+            prefix = ">>> " if i in marked else "    "
+            out.append(f"{prefix}{all_lines[i]}")
+        rendered.append("\n".join(out))
+
+    return "\n\n".join(rendered)
 
 
 def normalize_findings(
@@ -249,16 +376,18 @@ def normalize_findings(
             for el in d.get("elements", [])
         ]
 
-        # Collect the flagged source lines from every element in the finding.
-        # De-duplicate while preserving order.
-        seen: set[str] = set()
-        snippet_parts: list[str] = []
-        for el in d.get("elements", []):
-            snippet = _extract_source_lines(el, target_path)
-            if snippet and snippet not in seen:
-                seen.add(snippet)
-                snippet_parts.append(snippet)
-        source_lines = "\n\n".join(snippet_parts)
+        # Collect every element's flagged lines, grouped by file, then
+        # render one annotated block per distinct enclosing function —
+        # this is what prevents (a) losing surrounding context like an
+        # adjacent require() check, and (b) the same function being
+        # rendered multiple times with different lines starred when a
+        # finding (e.g. reentrancy-eth) has several elements landing in it.
+        by_file = _collect_flagged_lines_by_file(d.get("elements", []), target_path)
+        source_lines = "\n\n".join(
+            block
+            for filepath, lines in by_file.items()
+            if (block := _render_annotated_blocks(filepath, lines))
+        )
 
         # Use Slither's own "description" as the human-readable title where
         # possible; fall back to a cleaned-up version of the check name.
