@@ -296,9 +296,24 @@ _CLOSERS = set(_PAIRS.keys())
 # here) — so both checks run on every fix_snippet.
 _EMPTY_CALL_ARGS_RE = re.compile(r"\.(call|delegatecall|staticcall)\s*(\{[^{}]*\})?\s*\(\s*\)")
 
+# `.call(...)`/`.delegatecall(...)`/`.staticcall(...)` return a (bool,
+# bytes memory) TUPLE, not a bare bool. Passing the call expression
+# directly as require()'s/assert()'s/an if-condition's first argument
+# without first destructuring it — e.g.
+# `require(winner.call{value: x}(""), "failed")` — does not compile.
+# We've seen the LLM produce exactly this, syntactically balanced and
+# therefore invisible to _check_balance.
+_CALL_AS_BOOL_RE = re.compile(
+    r"\b(?:require|assert|if)\s*\(\s*[\w.]+\.(call|delegatecall|staticcall)\s*(?:\{[^{}]*\})?\s*\("
+)
+
 
 def _check_balance(snippet: str) -> tuple[bool, str]:
-    """Delimiter/quote balance check, escape- and string-literal-aware."""
+    """Delimiter/quote balance check, escape- and string-literal-aware.
+    Also comment-aware: a `//` line comment (e.g. a generated NOTE with an
+    English apostrophe like "prizePool's actual type") must not have its
+    apostrophe misread as opening a real string literal — skip to end of
+    line once a genuine (non-string) `//` is seen."""
     stack: list[str] = []
     in_str: str | None = None
     i = 0
@@ -311,6 +326,10 @@ def _check_balance(snippet: str) -> tuple[bool, str]:
             if ch == in_str:
                 in_str = None
             i += 1
+            continue
+        if snippet[i : i + 2] == "//":
+            nl = snippet.find("\n", i)
+            i = len(snippet) if nl == -1 else nl + 1
             continue
         if ch in ("'", '"'):
             in_str = ch
@@ -333,7 +352,8 @@ def _check_balance(snippet: str) -> tuple[bool, str]:
 
 def _validate_fix_snippet(snippet: str) -> tuple[bool, str]:
     """Runs all fix_snippet checks: delimiter balance + known Solidity
-    footguns (currently: missing required argument on low-level calls)."""
+    footguns (missing required argument on low-level calls; passing an
+    un-destructured call expression where a bool is required)."""
     ok, reason = _check_balance(snippet)
     if not ok:
         return ok, reason
@@ -343,6 +363,13 @@ def _validate_fix_snippet(snippet: str) -> tuple[bool, str]:
             f"'.{m.group(1)}(...)' is missing its required bytes argument "
             '(use `("")` for an empty payload — Solidity has no zero-argument '
             "overload of call/delegatecall/staticcall)"
+        )
+    m = _CALL_AS_BOOL_RE.search(snippet)
+    if m:
+        return False, (
+            f"'.{m.group(1)}(...)' returns (bool, bytes memory), not bool — "
+            "it can't be passed directly as a require()/assert()/if condition. "
+            "Destructure it first, e.g. `(bool ok, ) = x.call(...); require(ok, ...);`"
         )
     return True, ""
 
