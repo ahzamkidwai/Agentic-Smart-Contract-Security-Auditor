@@ -5,11 +5,14 @@ SQLModel persistence -> WeasyPrint PDF.
 """
 from __future__ import annotations
 
+import re
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.analyzers.slither_runner import (
@@ -22,8 +25,25 @@ from app.chains.schemas import AuditReport, RawFinding
 from app.db import engine
 from app.models.db_models import AuditRun, FindingRecord
 from app.reports.pdf_report import render_pdf
+from app.services.source_reading import (
+    primary_location,
+    read_contract_header,
+    read_full_source,
+)
 
 router = APIRouter()
+
+# Where pasted-contract text gets written to disk before being handed to
+# the exact same slither -> explain -> persist pipeline used for
+# path-based audits. Kept separate from `workspace/` (project uploads) so
+# the two flows can be cleaned up independently.
+_PASTE_WORKSPACE_ROOT = Path("workspace") / "pasted"
+_PASTE_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+
+# Only allow a safe, predictable filename — never trust user input for a
+# path component that gets joined onto disk.
+_SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}\.sol$")
+_MAX_PASTE_BYTES = 300_000
 
 
 def _read_contract_header(target_path: str, max_lines: int = 30) -> str:
@@ -97,6 +117,54 @@ def start_audit(req: AuditRequest, background_tasks: BackgroundTasks):
     return AuditRunOut(id=run_id, target=req.target_path, status="pending", total_findings=0)
 
 
+class PasteAuditRequest(BaseModel):
+    code: str = Field(..., description="Raw Solidity source pasted by the user")
+    filename: str = Field(
+        default="PastedContract.sol",
+        description="Display filename. Must end in .sol; only used for the on-disk temp file and the report.",
+    )
+
+
+@router.post("/audit/paste", response_model=AuditRunOut, status_code=202)
+def start_paste_audit(req: PasteAuditRequest, background_tasks: BackgroundTasks):
+    """
+    Same pipeline as POST /audit (Slither -> RAG explainer -> persistence),
+    but for a contract pasted directly into the UI instead of a path that
+    already exists on disk: the code is written to a private temp file
+    first, then handed to the identical _process_audit() used everywhere
+    else, so single-file and pasted-code audits get exactly the same
+    grounding/anti-hallucination guarantees.
+    """
+    code = req.code
+    if not code or not code.strip():
+        raise HTTPException(400, "code must not be empty")
+    if len(code.encode("utf-8")) > _MAX_PASTE_BYTES:
+        raise HTTPException(400, f"code exceeds {_MAX_PASTE_BYTES} byte limit")
+
+    filename = req.filename.strip() or "PastedContract.sol"
+    if not filename.lower().endswith(".sol"):
+        filename += ".sol"
+    if not _SAFE_FILENAME_RE.match(filename):
+        # Fall back to a safe generated name rather than rejecting the
+        # request outright over a cosmetic filename choice.
+        filename = "PastedContract.sol"
+
+    job_dir = _PASTE_WORKSPACE_ROOT / uuid.uuid4().hex
+    job_dir.mkdir(parents=True, exist_ok=True)
+    target_path = job_dir / filename
+    target_path.write_text(code, encoding="utf-8")
+
+    with Session(engine) as session:
+        run = AuditRun(target=str(target_path), status="pending")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    background_tasks.add_task(_process_audit, run_id, str(target_path))
+    return AuditRunOut(id=run_id, target=filename, status="pending", total_findings=0)
+
+
 def _process_audit(run_id: int, target_path: str) -> None:
     with Session(engine) as session:
         run = session.get(AuditRun, run_id)
@@ -110,8 +178,8 @@ def _process_audit(run_id: int, target_path: str) -> None:
 
         # Read the first 30 lines of the contract so the LLM can detect
         # already-applied fixes (imports, modifiers, pragma version).
-        contract_header = _read_contract_header(target_path, max_lines=30)
-        full_source = _read_full_source(target_path)
+        contract_header = read_contract_header(target_path, max_lines=30)
+        full_source = read_full_source(target_path)
 
         raw_findings = [
             RawFinding(**{**f, "contract_header": contract_header, "full_source": full_source})
@@ -136,6 +204,11 @@ def _process_audit(run_id: int, target_path: str) -> None:
             session.add(run)
 
             for raw, exp in zip(raw_findings, explained):
+                # Location comes straight from Slither's own source_mapping
+                # (raw.elements), never from the LLM's narration — this is
+                # what lets the UI show an exact file+line without any risk
+                # of the model inventing or mis-stating one.
+                loc = primary_location(raw.elements)
                 session.add(
                     FindingRecord(
                         audit_run_id=run_id,
@@ -143,14 +216,19 @@ def _process_audit(run_id: int, target_path: str) -> None:
                         check=raw.check,
                         severity=exp.severity,
                         swc_id=raw.swc_id,
+                        file_name=loc["file"],
+                        start_line=loc["start_line"],
+                        end_line=loc["end_line"],
                         raw_description=raw.description,
                         plain_explanation=exp.plain_explanation,
                         why_it_matters=exp.why_it_matters,
                         fix_snippet=exp.fix_snippet,
+                        fix_already_present=exp.fix_already_present,
                         references=exp.references,
                         related_finding_ids=exp.related_finding_ids,
                         severity_rationale=exp.severity_rationale,
                         applicability_note=exp.applicability_note,
+                        evidence=exp.evidence,
                     )
                 )
             session.commit()

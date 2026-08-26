@@ -20,7 +20,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional, List
 
-from sqlmodel import SQLModel, Field, Relationship
+from sqlmodel import JSON, Column, SQLModel, Field, Relationship
 
 
 class SourceType(str, Enum):
@@ -77,6 +77,14 @@ class AuditFile(SQLModel, table=True):
     findings_count: int = 0
     highest_severity: Optional[str] = None
     pdf_path: Optional[str] = None                 # path to per-file rendered report
+
+    # Full per-finding detail for this file: list of dicts, each with
+    # finding_id, check, severity, swc_id, file_name, start_line, end_line,
+    # plain_explanation, why_it_matters, fix_snippet, fix_already_present,
+    # references, evidence, severity_rationale, applicability_note,
+    # related_finding_ids. Populated once by _process_job (see
+    # routes_project.py); empty list for files with zero findings.
+    findings_json: List[dict] = Field(default_factory=list, sa_column=Column(JSON))
 
     job: Optional[AuditJob] = Relationship(back_populates="files")
 

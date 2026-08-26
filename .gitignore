@@ -8,3 +8,5 @@ __pycache__/
 .env
 .pytest_cache/
 workspace/
+.venv-analysis/
+.venv-app/.env
