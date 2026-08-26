@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>audit-explainer · plain-English smart contract audits</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0d0c;
+    --panel:#101513;
+    --panel-2:#141a18;
+    --line:#22302b;
+    --text:#dfe8e3;
+    --text-dim:#8fa39b;
+    --mono: 'IBM Plex Mono', monospace;
+    --sans: 'Inter', sans-serif;
+    --amber:#f2b84b;
+    --green:#4ade80;
+    --red:#ff5c5c;
+    --orange:#ff9f4a;
+    --blue:#57b8ff;
+    --grey:#93a29c;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(ellipse at top left, rgba(74,222,128,0.05), transparent 45%),
+      radial-gradient(ellipse at bottom right, rgba(242,184,75,0.04), transparent 50%),
+      var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    min-height:100vh;
+  }
+  .wrap{max-width:1040px;margin:0 auto;padding:40px 24px 80px;}
+
+  /* ---------- header ---------- */
+  header{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:8px;}
+  .brand{display:flex;align-items:center;gap:12px;}
+  .brand .dot{width:11px;height:11px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green);animation:pulse 2.4s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+  .brand h1{font-family:var(--mono);font-size:20px;font-weight:600;letter-spacing:-0.02em;margin:0;}
+  .brand h1 span{color:var(--text-dim);font-weight:400;}
+  .tagline{color:var(--text-dim);font-size:14px;margin:6px 0 0 23px;max-width:520px;line-height:1.5;}
+
+  .api-config{font-family:var(--mono);font-size:12px;color:var(--text-dim);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:260px;}
+  .api-config label{display:flex;justify-content:space-between;align-items:center;}
+  .api-config input{background:var(--panel-2);border:1px solid var(--line);color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 8px;border-radius:6px;width:180px;}
+  .api-config .status{display:flex;align-items:center;gap:6px;}
+  .api-config .status .led{width:7px;height:7px;border-radius:50%;background:var(--grey);}
+  .api-config .status.ok .led{background:var(--green);}
+  .api-config .status.bad .led{background:var(--red);}
+
+  /* ---------- pipeline strip ---------- */
+  .pipeline{margin-top:32px;border:1px solid var(--line);border-radius:14px;background:var(--panel);overflow:hidden;}
+  .pipeline-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;cursor:pointer;user-select:none;}
+  .pipeline-head h2{font-size:13px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--text-dim);margin:0;}
+  .pipeline-head .chev{color:var(--text-dim);transition:transform .2s;}
+  .pipeline.open .chev{transform:rotate(180deg);}
+  .pipeline-body{max-height:0;overflow:hidden;transition:max-height .25s ease;}
+  .pipeline.open .pipeline-body{max-height:900px;}
+  .pipeline-inner{padding:4px 18px 20px;}
+  .steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px;}
+  .step{background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12.5px;line-height:1.5;color:var(--text-dim);}
+  .step b{display:block;color:var(--text);font-family:var(--mono);font-size:12px;margin-bottom:4px;}
+  .guardrails{border-top:1px solid var(--line);padding-top:14px;}
+  .guardrails h3{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--amber);margin:0 0 10px;font-family:var(--mono);}
+  .guardrails ul{margin:0;padding-left:18px;color:var(--text-dim);font-size:13px;line-height:1.7;}
+  .guardrails li b{color:var(--text);}
+
+  /* ---------- tabs ---------- */
+  .tabs{display:flex;gap:2px;margin-top:28px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:4px;width:fit-content;}
+  .tab{font-family:var(--mono);font-size:13px;padding:9px 18px;border-radius:9px;color:var(--text-dim);cursor:pointer;border:none;background:transparent;transition:.15s;}
+  .tab.active{background:var(--panel-2);color:var(--text);box-shadow:inset 0 0 0 1px var(--line);}
+  .tab:hover:not(.active){color:var(--text);}
+
+  .panel{margin-top:20px;border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:22px;}
+  .field{margin-bottom:16px;}
+  .field label{display:block;font-size:12.5px;color:var(--text-dim);margin-bottom:6px;font-family:var(--mono);}
+  .field input[type=text]{width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);padding:11px 12px;border-radius:8px;font-family:var(--mono);font-size:13.5px;}
+  .field input[type=text]:focus{outline:none;border-color:var(--green);}
+  .row{display:flex;gap:12px;}
+  .row .field{flex:1;}
+  textarea{width:100%;min-height:280px;background:#0d1210;border:1px solid var(--line);color:#c9e8d5;padding:14px;border-radius:10px;font-family:var(--mono);font-size:13px;line-height:1.55;resize:vertical;}
+  textarea:focus{outline:none;border-color:var(--green);}
+  .btn{font-family:var(--mono);font-size:13.5px;font-weight:600;background:var(--green);color:#062b16;border:none;padding:12px 20px;border-radius:9px;cursor:pointer;transition:.15s;}
+  .btn:hover{filter:brightness(1.08);}
+  .btn:disabled{background:var(--line);color:var(--text-dim);cursor:not-allowed;}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text);}
+  .hint{color:var(--text-dim);font-size:12.5px;margin-top:8px;line-height:1.5;}
+
+  /* ---------- status / progress ---------- */
+  .progress-card{margin-top:20px;border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:20px;display:none;}
+  .progress-card.show{display:block;}
+  .progress-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+  .progress-top .stage{font-family:var(--mono);font-size:13px;color:var(--amber);}
+  .progress-top .target{font-size:12px;color:var(--text-dim);word-break:break-all;max-width:520px;}
+  .bar{height:6px;border-radius:4px;background:var(--panel-2);overflow:hidden;}
+  .bar > div{height:100%;background:linear-gradient(90deg,var(--green),var(--blue));width:8%;transition:width .4s;}
+  .stage-list{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;}
+  .stage-pill{font-family:var(--mono);font-size:11px;padding:4px 9px;border-radius:20px;border:1px solid var(--line);color:var(--text-dim);}
+  .stage-pill.active{border-color:var(--amber);color:var(--amber);}
+  .stage-pill.done{border-color:var(--green);color:var(--green);}
+  .error-box{margin-top:14px;border:1px solid rgba(255,92,92,.4);background:rgba(255,92,92,.08);color:#ffb4b4;padding:12px 14px;border-radius:10px;font-size:13px;font-family:var(--mono);white-space:pre-wrap;}
+
+  /* ---------- results ---------- */
+  .results{margin-top:24px;}
+  .summary-bar{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px;}
+  .summary-chip{font-family:var(--mono);font-size:12px;padding:7px 12px;border-radius:9px;border:1px solid var(--line);background:var(--panel);color:var(--text-dim);}
+  .summary-chip b{color:var(--text);}
+
+  .file-row{border:1px solid var(--line);border-radius:12px;background:var(--panel);margin-bottom:10px;overflow:hidden;}
+  .file-row-head{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;cursor:pointer;}
+  .file-row-head .fname{font-family:var(--mono);font-size:13.5px;}
+  .file-row-head .fmeta{display:flex;align-items:center;gap:10px;}
+  .badge{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:20px;letter-spacing:.02em;}
+  .sev-Critical{background:rgba(255,92,92,.15);color:var(--red);border:1px solid rgba(255,92,92,.35);}
+  .sev-High{background:rgba(255,159,74,.15);color:var(--orange);border:1px solid rgba(255,159,74,.35);}
+  .sev-Medium{background:rgba(242,184,75,.15);color:var(--amber);border:1px solid rgba(242,184,75,.35);}
+  .sev-Low{background:rgba(87,184,255,.15);color:var(--blue);border:1px solid rgba(87,184,255,.35);}
+  .sev-Informational,.sev-Info,.sev-Optimization{background:rgba(147,162,156,.15);color:var(--grey);border:1px solid rgba(147,162,156,.35);}
+  .sev-clean{background:rgba(74,222,128,.12);color:var(--green);border:1px solid rgba(74,222,128,.3);}
+  .file-body{display:none;border-top:1px solid var(--line);padding:6px 16px 16px;}
+  .file-row.open .file-body{display:block;}
+  .file-row.open .chev{transform:rotate(180deg);}
+  .chev{color:var(--text-dim);transition:transform .15s;}
+
+  .finding{border:1px solid var(--line);border-radius:10px;background:var(--panel-2);margin-top:12px;padding:16px;}
+  .finding-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;}
+  .finding-title{font-size:14.5px;font-weight:600;}
+  .loc-tag{font-family:var(--mono);font-size:12px;color:var(--amber);background:rgba(242,184,75,.08);border:1px solid rgba(242,184,75,.25);padding:3px 9px;border-radius:6px;white-space:nowrap;}
+  .finding-badges{display:flex;gap:6px;flex-wrap:wrap;}
+  .finding p{font-size:13.5px;line-height:1.6;color:var(--text);margin:10px 0 0;}
+  .finding .why{color:var(--text-dim);}
+  .kv{margin-top:10px;font-size:12.5px;color:var(--text-dim);}
+  .kv b{color:var(--text-dim);}
+  pre.code-flag{background:#090c0b;border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-family:var(--mono);font-size:12.3px;color:#a9c4b8;overflow-x:auto;margin-top:10px;white-space:pre;}
+  pre.fix{background:#0b1512;border:1px solid rgba(74,222,128,.25);border-radius:8px;padding:12px 14px;font-family:var(--mono);font-size:12.3px;color:#bfe8cf;overflow-x:auto;margin-top:6px;white-space:pre-wrap;}
+  .evidence-box{margin-top:10px;border-left:2px solid var(--green);padding:8px 12px;background:rgba(74,222,128,.05);border-radius:0 8px 8px 0;font-size:12.5px;color:var(--text-dim);}
+  .evidence-box b{color:var(--green);font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;}
+  .applic-box{margin-top:10px;border-left:2px solid var(--blue);padding:8px 12px;background:rgba(87,184,255,.05);border-radius:0 8px 8px 0;font-size:12.5px;color:var(--text-dim);}
+  .applic-box b{color:var(--blue);font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;}
+  .fix-label{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);margin-top:12px;}
+
+  .empty-clean{padding:14px;color:var(--text-dim);font-size:13px;font-family:var(--mono);}
+
+  footer{margin-top:48px;text-align:center;color:var(--text-dim);font-size:12px;font-family:var(--mono);}
+  a{color:var(--blue);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <div class="brand">
+        <div class="dot"></div>
+        <h1>audit<span>-explainer</span></h1>
+      </div>
+      <p class="tagline">Turns raw static-analysis findings into plain-English, file-and-line-grounded audit reports — for a GitHub repo or a single pasted contract.</p>
+    </div>
+    <div class="api-config">
+      <label>API base
+        <input id="apiBase" type="text" value="http://localhost:8000" />
+      </label>
+      <div class="status" id="apiStatus"><div class="led"></div><span>not checked</span></div>
+    </div>
+  </header>
+
+  <div class="pipeline" id="pipelineCard">
+    <div class="pipeline-head" onclick="document.getElementById('pipelineCard').classList.toggle('open')">
+      <h2>Pipeline &amp; anti-hallucination guardrails</h2>
+      <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </div>
+    <div class="pipeline-body">
+      <div class="pipeline-inner">
+        <div class="steps">
+          <div class="step"><b>1. Ingest</b>GitHub URL is cloned, or pasted code is written to a scratch .sol file. Zip-slip and size-limit guarded.</div>
+          <div class="step"><b>2. Static analysis</b>Slither runs in an isolated venv against the real compiler output — findings, not guesses.</div>
+          <div class="step"><b>3. Locate</b>Exact file + line numbers are read from Slither's own source_mapping, never from the LLM.</div>
+          <div class="step"><b>4. Ground</b>Deterministic checks (return-value handling, compiler-bug applicability, CEI ordering) compute facts the LLM must defer to.</div>
+          <div class="step"><b>5. Explain (RAG)</b>An SWC-Registry retriever + temperature-0 LLM writes the plain-English explanation, constrained to only the flagged lines.</div>
+          <div class="step"><b>6. Verify &amp; render</b>Fix snippets are syntax-validated (auto-repaired once) before being shipped; a PDF/JSON report is produced.</div>
+        </div>
+        <div class="guardrails">
+          <h3>Why this shouldn't hallucinate</h3>
+          <ul>
+            <li><b>Grounded, not generated, locations.</b> File name and line number shown on every finding come directly from Slither's source_mapping — the model never invents them.</li>
+            <li><b>Temperature = 0</b> for the explainer LLM, and the prompt forbids describing anything not visible in the flagged source lines.</li>
+            <li><b>Deterministic "ground truth facts"</b> (e.g. "return value IS checked") are computed in Python and injected into the prompt — the model is instructed to defer to them rather than re-guess.</li>
+            <li><b>Detector-scoped prompting</b> stops the model from borrowing risk language from an unrelated vulnerability class just because it "sounds related."</li>
+            <li><b>SWC references are whitelisted</b> to IDs that actually appear in the retrieved registry context, not whatever the model recalls.</li>
+            <li><b>Fix snippets are statically validated</b> (balanced delimiters, valid low-level-call syntax) with a single automatic repair attempt before falling back to "manual review required" rather than shipping broken code silently.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="github">GitHub repo</button>
+    <button class="tab" data-tab="paste">Paste contract</button>
+  </div>
+
+  <!-- GitHub panel -->
+  <div class="panel" id="panel-github">
+    <div class="row">
+      <div class="field" style="flex:2">
+        <label>Repository URL</label>
+        <input type="text" id="ghUrl" placeholder="https://github.com/owner/repo" />
+      </div>
+      <div class="field" style="flex:1">
+        <label>Branch / ref</label>
+        <input type="text" id="ghRef" placeholder="main" value="main" />
+      </div>
+    </div>
+    <button class="btn" id="ghSubmit">Scan repository</button>
+    <p class="hint">The repo is cloned into an isolated workspace, its Hardhat/Foundry contracts are located, dependencies installed, and every .sol file is run through the pipeline above — including files with zero findings.</p>
+  </div>
+
+  <!-- Paste panel -->
+  <div class="panel" id="panel-paste" style="display:none">
+    <div class="field">
+      <label>Filename (optional)</label>
+      <input type="text" id="pasteFilename" placeholder="MyContract.sol" value="MyContract.sol" />
+    </div>
+    <div class="field">
+      <label>Solidity source</label>
+      <textarea id="pasteCode" placeholder="// SPDX-License-Identifier: MIT&#10;pragma solidity ^0.8.0;&#10;&#10;contract MyContract {&#10;    ...&#10;}"></textarea>
+    </div>
+    <button class="btn" id="pasteSubmit">Analyze contract</button>
+    <p class="hint">The pasted code is written to a private temp file and run through the exact same Slither → grounding → RAG-explainer pipeline as the GitHub flow.</p>
+  </div>
+
+  <!-- Progress -->
+  <div class="progress-card" id="progressCard">
+    <div class="progress-top">
+      <div class="stage" id="stageLabel">Starting…</div>
+      <div class="target" id="targetLabel"></div>
+    </div>
+    <div class="bar"><div id="barFill"></div></div>
+    <div class="stage-list" id="stageList"></div>
+    <div class="error-box" id="errorBox" style="display:none"></div>
+  </div>
+
+  <!-- Results -->
+  <div class="results" id="results" style="display:none"></div>
+
+  <footer>audit-explainer · Slither + RAG, file-and-line grounded · local prototype</footer>
+</div>
+
+<script>
+const $ = (s, el=document) => el.querySelector(s);
+const $$ = (s, el=document) => Array.from(el.querySelectorAll(s));
+
+function apiBase(){ return $('#apiBase').value.replace(/\/$/, ''); }
+
+// ---- tabs ----
+$$('.tab').forEach(t => t.addEventListener('click', () => {
+  $$('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  $('#panel-github').style.display = t.dataset.tab === 'github' ? 'block' : 'none';
+  $('#panel-paste').style.display = t.dataset.tab === 'paste' ? 'block' : 'none';
+}));
+
+// ---- API health check ----
+async function checkHealth(){
+  const el = $('#apiStatus');
+  try{
+    const res = await fetch(apiBase() + '/health');
+    if(res.ok){ el.className='status ok'; el.querySelector('span').textContent='connected'; }
+    else throw new Error();
+  }catch(e){
+    el.className='status bad'; el.querySelector('span').textContent='unreachable';
+  }
+}
+$('#apiBase').addEventListener('change', checkHealth);
+checkHealth();
+
+// ---- shared progress UI ----
+const GH_STAGES = ['pending','extracting','installing_deps','running_slither','explaining','done'];
+const SINGLE_STAGES = ['pending','running','done'];
+
+function showProgress(target){
+  $('#progressCard').classList.add('show');
+  $('#results').style.display='none';
+  $('#errorBox').style.display='none';
+  $('#targetLabel').textContent = target;
+  $('#barFill').style.width='6%';
+}
+function renderStages(stages, current){
+  const list = $('#stageList');
+  list.innerHTML = '';
+  stages.forEach(s => {
+    const i = stages.indexOf(s);
+    const cur = stages.indexOf(current);
+    const pill = document.createElement('div');
+    pill.className = 'stage-pill' + (s===current ? ' active' : (i < cur ? ' done' : ''));
+    pill.textContent = s.replace(/_/g,' ');
+    list.appendChild(pill);
+  });
+}
+function setStage(stages, current, pct){
+  $('#stageLabel').textContent = 'Status: ' + current.replace(/_/g,' ');
+  $('#barFill').style.width = pct + '%';
+  renderStages(stages, current);
+}
+function showError(msg){
+  $('#errorBox').style.display='block';
+  $('#errorBox').textContent = msg;
+  $('#stageLabel').textContent = 'Failed';
+}
+
+// ---- severity helpers ----
+function sevClass(sev){
+  return 'sev-' + (sev || 'Informational').replace(/\s/g,'');
+}
+
+function findingCard(f){
+  const loc = f.file_name
+    ? `${f.file_name}${f.start_line ? ':' + f.start_line + (f.end_line && f.end_line!==f.start_line ? '-' + f.end_line : '') : ''}`
+    : (f.raw_description ? '' : 'location unavailable');
+  const evidence = f.evidence && Object.keys(f.evidence).length
+    ? `<div class="evidence-box"><b>Deterministic evidence</b><br/>${Object.entries(f.evidence).map(([k,v])=>`${k}: ${escapeHtml(String(v))}`).join(' &nbsp;·&nbsp; ')}</div>`
+    : '';
+  const applic = f.applicability_note
+    ? `<div class="applic-box"><b>Applicability note</b><br/>${escapeHtml(f.applicability_note)}</div>`
+    : '';
+  const rationale = f.severity_rationale
+    ? `<div class="kv"><b>Why this severity:</b> ${escapeHtml(f.severity_rationale)}</div>` : '';
+  const refs = (f.references && f.references.length)
+    ? `<div class="kv"><b>SWC:</b> ${f.references.join(', ')}</div>` : '';
+  const already = f.fix_already_present
+    ? `<span class="badge sev-clean">fix already present</span>` : '';
+
+  return `
+    <div class="finding">
+      <div class="finding-top">
+        <div>
+          <div class="finding-title">${escapeHtml(f.title || f.check || 'Finding')}</div>
+        </div>
+        <div class="finding-badges">
+          ${loc ? `<span class="loc-tag">${escapeHtml(loc)}</span>` : ''}
+          <span class="badge ${sevClass(f.severity)}">${escapeHtml(f.severity || 'Informational')}</span>
+          ${already}
+        </div>
+      </div>
+      <p>${escapeHtml(f.plain_explanation || f.raw_description || '')}</p>
+      ${f.why_it_matters ? `<p class="why"><b>Why it matters:</b> ${escapeHtml(f.why_it_matters)}</p>` : ''}
+      ${refs}${rationale}
+      ${evidence}${applic}
+      ${f.fix_snippet ? `<div class="fix-label">Suggested fix</div><pre class="fix">${escapeHtml(f.fix_snippet)}</pre>` : ''}
+    </div>`;
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+// =====================================================================
+// GitHub flow
+// =====================================================================
+$('#ghSubmit').addEventListener('click', async () => {
+  const url = $('#ghUrl').value.trim();
+  if(!url){ alert('Enter a GitHub repository URL'); return; }
+  const ref = $('#ghRef').value.trim() || 'main';
+
+  $('#ghSubmit').disabled = true;
+  showProgress(url);
+  setStage(GH_STAGES, 'pending', 6);
+
+  try{
+    const startRes = await fetch(`${apiBase()}/audit/project/github?` + new URLSearchParams({github_url: url, ref}), { method:'POST' });
+    if(!startRes.ok){ throw new Error((await startRes.json()).detail || 'Failed to start job'); }
+    const { job_id } = await startRes.json();
+
+    await pollGithubJob(job_id);
+  }catch(e){
+    showError(String(e.message || e));
+  }finally{
+    $('#ghSubmit').disabled = false;
+  }
+});
+
+async function pollGithubJob(jobId){
+  while(true){
+    const res = await fetch(`${apiBase()}/audit/project/${jobId}`);
+    if(!res.ok) throw new Error('Lost track of job ' + jobId);
+    const job = await res.json();
+    const displayStage = GH_STAGES.includes(job.status) ? job.status : 'explaining';
+    const i = GH_STAGES.indexOf(displayStage);
+    const pct = Math.max(6, Math.min(96, 10 + i * 18));
+    setStage(GH_STAGES, displayStage, pct);
+
+    if(job.status === 'failed'){
+      showError(job.error_message || 'Job failed with no error message.');
+      return;
+    }
+    if(job.status === 'done'){
+      setStage(GH_STAGES, 'done', 100);
+      await renderGithubResults(jobId, job);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+
+async function renderGithubResults(jobId, job){
+  const res = await fetch(`${apiBase()}/audit/project/${jobId}/files`);
+  const data = await res.json();
+  const results = $('#results');
+  results.style.display = 'block';
+
+  const totalFindings = data.total_findings ?? data.files.reduce((a,f)=>a+f.findings_count,0);
+  results.innerHTML = `
+    <div class="summary-bar">
+      <div class="summary-chip"><b>${data.files.length}</b> files scanned</div>
+      <div class="summary-chip"><b>${totalFindings}</b> findings</div>
+      <div class="summary-chip">job <b>${jobId.slice(0,8)}</b></div>
+    </div>
+    <div id="fileList"></div>
+  `;
+  const fileList = $('#fileList');
+
+  data.files
+    .slice()
+    .sort((a,b) => b.findings_count - a.findings_count)
+    .forEach(f => {
+      const row = document.createElement('div');
+      row.className = 'file-row';
+      row.innerHTML = `
+        <div class="file-row-head">
+          <div class="fname">${escapeHtml(f.relative_path)}</div>
+          <div class="fmeta">
+            ${f.findings_count === 0
+              ? '<span class="badge sev-clean">clean</span>'
+              : `<span class="badge ${sevClass(f.highest_severity)}">${f.findings_count} finding${f.findings_count>1?'s':''} · ${escapeHtml(f.highest_severity||'')}</span>`}
+            <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </div>
+        </div>
+        <div class="file-body"><div class="loading-inner" style="color:var(--text-dim);font-family:var(--mono);font-size:12px;">loading…</div></div>
+      `;
+      const head = row.querySelector('.file-row-head');
+      const body = row.querySelector('.file-body');
+      let loaded = false;
+      head.addEventListener('click', async () => {
+        row.classList.toggle('open');
+        if(row.classList.contains('open') && !loaded){
+          loaded = true;
+          if(f.findings_count === 0){
+            body.innerHTML = `<div class="empty-clean">No findings reported for this file.</div>`;
+            return;
+          }
+          const detail = await fetch(`${apiBase()}/audit/project/${jobId}/files/${f.id}`).then(r=>r.json());
+          body.innerHTML = detail.findings.map(findingCard).join('');
+        }
+      });
+      fileList.appendChild(row);
+    });
+}
+
+// =====================================================================
+// Paste flow
+// =====================================================================
+$('#pasteSubmit').addEventListener('click', async () => {
+  const code = $('#pasteCode').value;
+  const filename = $('#pasteFilename').value.trim() || 'MyContract.sol';
+  if(!code.trim()){ alert('Paste some Solidity source first'); return; }
+
+  $('#pasteSubmit').disabled = true;
+  showProgress(filename);
+  setStage(SINGLE_STAGES, 'pending', 8);
+
+  try{
+    const startRes = await fetch(`${apiBase()}/api/audit/paste`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ code, filename })
+    });
+    if(!startRes.ok){ throw new Error((await startRes.json()).detail || 'Failed to start audit'); }
+    const { id } = await startRes.json();
+    await pollSingleAudit(id);
+  }catch(e){
+    showError(String(e.message || e));
+  }finally{
+    $('#pasteSubmit').disabled = false;
+  }
+});
+
+async function pollSingleAudit(runId){
+  while(true){
+    const res = await fetch(`${apiBase()}/api/audit/${runId}`);
+    if(!res.ok) throw new Error('Lost track of run ' + runId);
+    const run = await res.json();
+    const pct = run.status === 'pending' ? 15 : run.status === 'running' ? 55 : 100;
+    setStage(SINGLE_STAGES, run.status, pct);
+
+    if(run.status === 'failed'){
+      showError(run.error_message || 'Audit failed with no error message.');
+      return;
+    }
+    if(run.status === 'done'){
+      renderSingleResults(runId, run);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+
+function renderSingleResults(runId, run){
+  const results = $('#results');
+  results.style.display = 'block';
+  results.innerHTML = `
+    <div class="summary-bar">
+      <div class="summary-chip"><b>${run.total_findings}</b> findings</div>
+      <div class="summary-chip">run <b>#${runId}</b></div>
+      <div class="summary-chip"><a href="${apiBase()}/api/audit/${runId}/report.pdf" target="_blank">Download PDF report ↗</a></div>
+    </div>
+    <div id="singleFindings"></div>
+  `;
+  const container = $('#singleFindings');
+  if(!run.findings.length){
+    container.innerHTML = `<div class="file-row"><div class="empty-clean" style="padding:16px">No findings reported for this contract.</div></div>`;
+    return;
+  }
+  container.innerHTML = run.findings.map(findingCard).join('');
+}
+</script>
+</body>
+</html>
