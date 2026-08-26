@@ -46,6 +46,52 @@ _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}\.sol$")
 _MAX_PASTE_BYTES = 300_000
 
 
+def _read_contract_header(target_path: str, max_lines: int = 30) -> str:
+    """
+    Read the first ``max_lines`` lines of a Solidity file.
+
+    Returns an empty string if target_path is a directory or cannot be read.
+    This gives the LLM visibility into pragma, imports, and contract-level
+    declarations so it can detect already-applied fixes (e.g. ReentrancyGuard
+    already imported) without falsely recommending them again.
+    """
+    from pathlib import Path
+
+    p = Path(target_path)
+    if not p.is_file() or p.suffix.lower() != ".sol":
+        return ""
+    try:
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[:max_lines])
+    except Exception:
+        return ""
+
+
+_MAX_FULL_SOURCE_BYTES = 300_000  # sanity cap; typical contracts are a few KB
+
+
+def _read_full_source(target_path: str) -> str:
+    """
+    Read the entire contract file for deterministic, programmatic checks
+    (e.g. compiler_analysis's regex trigger-condition matching) — this is
+    NOT injected into the LLM prompt wholesale, only used in Python logic,
+    so there's no prompt-size concern; only a sanity cap against
+    pathological input.
+    """
+    from pathlib import Path
+
+    p = Path(target_path)
+    if not p.is_file() or p.suffix.lower() != ".sol":
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        return text[:_MAX_FULL_SOURCE_BYTES]
+    except Exception:
+        return ""
+
+
+
+
 class AuditRequest(BaseModel):
     target_path: str  # absolute path to a .sol file or project directory
 
