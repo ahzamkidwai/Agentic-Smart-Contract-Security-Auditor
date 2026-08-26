@@ -230,6 +230,58 @@ curl -o report.pdf http://127.0.0.1:8000/api/audit/1/report.pdf
 
 ---
 
+---
+
+## Frontend (`frontend/index.html`)
+
+A single static HTML/JS file — no build step, no framework — with two
+tabs:
+
+1. **GitHub repo** — paste a repo URL + branch, hits
+   `POST /audit/project/github`, polls `GET /audit/project/{job_id}`, then
+   lists every scanned file (including clean ones) with an expandable
+   findings panel per file, sourced from
+   `GET /audit/project/{job_id}/files/{file_id}`.
+2. **Paste contract** — paste raw Solidity, hits the new
+   `POST /api/audit/paste`, polls `GET /api/audit/{run_id}`, and renders
+   findings + a PDF download link.
+
+Every finding shows its **file name and exact line number** (taken from
+Slither's own `source_mapping`, not the LLM), severity, plain-English
+explanation, why it matters, deterministic evidence/applicability notes,
+and a validated fix snippet. A collapsible "Pipeline & anti-hallucination
+guardrails" panel at the top explains each stage.
+
+**To run it:** start the API (`uvicorn main:app --reload`), then just open
+`frontend/index.html` in a browser (or serve it: `python -m http.server
+5500 --directory frontend`). Set the "API base" field in the top-right to
+wherever uvicorn is listening (default `http://localhost:8000`) — CORS is
+already enabled in `main.py` for this.
+
+### New/changed backend surface
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/audit/paste` | New. `{code, filename}` → writes to a scratch file, runs the same pipeline as `POST /api/audit`. |
+| `GET /audit/project/{job_id}/files/{file_id}` | New. Full per-finding detail (file, line, explanation, evidence) for one file. |
+| `POST /audit/project/github`, `/upload`, `GET /{job_id}`, `/{job_id}/files` | Unchanged endpoints, now actually wired to the RAG explainer (previously a stub — see `_process_job`'s former TODO block) and returning real per-file, per-line findings. |
+
+### One-time migration
+
+The `FindingRecord`/`AuditFile` tables gained new columns (`file_name`,
+`start_line`, `end_line`, `evidence`, `findings_json`, etc.). If you already
+have a `data/audit_explainer.db` from a previous run, apply the migration
+once:
+
+```bash
+python scripts/migrate_add_location_and_findings_json.py
+```
+
+(A fresh database created via `init_db()` already has the full current
+schema — no migration needed.)
+
+---
+
 ## Extending it
 
 - **More SWC coverage:** drop a new `SWC-###.md` into `data/swc_registry/`,

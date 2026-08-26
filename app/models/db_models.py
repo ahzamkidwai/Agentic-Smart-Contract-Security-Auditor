@@ -27,13 +27,24 @@ class FindingRecord(SQLModel, table=True):
     severity: str
     swc_id: Optional[str] = None
 
+    # --- Exact location, extracted deterministically from Slither's own
+    # source_mapping (never from LLM narration) so file/line display can
+    # never hallucinate a location. ---
+    file_name: Optional[str] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+
     raw_description: str
     plain_explanation: str
     why_it_matters: str
     fix_snippet: str
+    fix_already_present: bool = False
     references: List[str] = Field(default_factory=list, sa_column=Column(JSON))
     related_finding_ids: List[str] = Field(default_factory=list, sa_column=Column(JSON))
     severity_rationale: str = ""
     applicability_note: str = ""
+    # Deterministic facts (line numbers, variable names, call ordering)
+    # pulled straight from Slither's output — see ExplainedFinding.evidence.
+    evidence: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     audit_run: Optional[AuditRun] = Relationship(back_populates="findings")
