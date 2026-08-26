@@ -48,11 +48,11 @@ class Settings(BaseSettings):
     SOLC_SELECT_BIN: str = _venv_bin(".venv-analysis", "solc-select")
 
     # --- LLM provider (pick ONE, both have generous free tiers) ---
-    LLM_PROVIDER: str = "groq"  # "groq" | "gemini"
-    GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
-    GOOGLE_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-1.5-flash"
+    LLM_PROVIDER: str = "gemini"  # "groq" | "gemini"
+    # GROQ_API_KEY: str = ""
+    # GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GOOGLE_API_KEY: str = "REDACTED"
+    GEMINI_MODEL: str = "gemini-3.5-flash"
     HF_TOKEN: str = ""
 
     # --- Vector store / knowledge base ---

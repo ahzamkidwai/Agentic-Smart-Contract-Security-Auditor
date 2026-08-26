@@ -70,10 +70,27 @@ def clone_repo(github_url: str, job_dir: Path, ref: str = "main") -> Path:
         # Common case: ref doesn't exist, repo private/not found, etc.
         raise WorkspaceError(f"git clone failed: {result.stderr.strip()[:500]}")
 
-    # Strip .git so it's not accidentally picked up by later steps
+    # NOTE: .git is intentionally kept here (not stripped). Foundry
+    # projects manage their dependencies (forge-std, openzeppelin-contracts,
+    # etc.) as git submodules, so `forge install` in project_type.py's
+    # install_dependencies() requires a real .git directory to exist —
+    # stripping it here caused every Foundry repo's dependency install to
+    # fail with "fatal: not a git repository". find_solidity_files()
+    # already excludes .git from its scan, so there's no leakage risk in
+    # keeping it; call strip_git_dir() yourself after dependency install
+    # if you want it gone before Slither runs.
+    return source_dir
+
+
+def strip_git_dir(source_dir: Path) -> None:
+    """
+    Optional cleanup: remove .git after dependency installation is done
+    and Slither is about to run. Safe to call any time after
+    install_dependencies() — Foundry doesn't need .git once `forge install`
+    has already populated lib/.
+    """
+    import shutil
+
     git_dir = source_dir / ".git"
     if git_dir.exists():
-        import shutil
         shutil.rmtree(git_dir, ignore_errors=True)
-
-    return source_dir
